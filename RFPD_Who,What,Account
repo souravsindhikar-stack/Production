@@ -1,0 +1,206 @@
+import os
+import pandas as pd
+
+# ========= USER INPUTS =========
+# Source file containing data to map
+SOURCE_FILE = r"D:\Production\Source\Source_File.csv"
+
+# Lookup file
+USER_LOOKUP_FILE = r"D:\Production\Lkp Files\DigitalVsComponent_User_Lkp_File.csv"
+
+# Output directory
+OUTPUT_DIR = r"D:\Production\Output"
+
+# RFPD reference file (Excel) containing IDs to blank out
+RFPD_REFERENCE_FILE = r"D:\Production\Lkp Files\RFPD_Who,What,AccountId.xlsx"
+
+# ========= CONSTANTS =========
+# Default IDs for user fields
+DEFAULT_OWNER_ID = "005Vq000008gEtBIAU"
+DEFAULT_CREATEDBY_LASTMODIFIED_ID = "005A0000000rXeVIAU"
+
+CHUNK_SIZE = 50_000
+
+# ========= END OF USER INPUTS =========
+
+
+def load_user_lookup(path):
+    """Load user lookup file and return simple mapping function"""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"User lookup file not found: {path}")
+    
+    df = pd.read_csv(path, dtype=str).fillna("")
+    
+    # Check for required columns
+    if "Legacy_SF_Record_ID__c" not in df.columns or "Id" not in df.columns:
+        raise ValueError(f"User lookup file must contain 'Legacy_SF_Record_ID__c' and 'Id' columns")
+    
+    # Strip whitespace from columns
+    df["Legacy_SF_Record_ID__c"] = df["Legacy_SF_Record_ID__c"].astype(str).str.strip()
+    df["Id"] = df["Id"].astype(str).str.strip()
+    
+    # Build simple mapping dictionary: Legacy_SF_Record_ID__c -> Id
+    lookup_dict = {
+        str(k).strip().lower(): str(v).strip()
+        for k, v in zip(df["Legacy_SF_Record_ID__c"], df["Id"])
+        if str(k).strip()
+    }
+    
+    def map_user_id(legacy_id):
+        """Simple lookup: Legacy_SF_Record_ID__c -> Id"""
+        if not legacy_id or str(legacy_id).strip() == "":
+            return ""
+        
+        legacy_id_lc = str(legacy_id).strip().lower()
+        return lookup_dict.get(legacy_id_lc, "")
+    
+    return map_user_id
+
+
+def load_rfpd_reference(path):
+    """Load RFPD reference Excel file and return exclusion sets per column"""
+    if not os.path.exists(path):
+        print(f"⚠️  RFPD reference file not found: {path}")
+        print("   Skipping RFPD blanking...")
+        return {}
+    
+    try:
+        df = pd.read_excel(path, dtype=str).fillna("")
+        
+        # Build exclusion sets for each column
+        exclusion_dict = {}
+        for col in df.columns:
+            # Get all non-empty values from this column and convert to set for fast lookup
+            values = df[col].astype(str).str.strip()
+            non_empty = {v.lower() for v in values if v and v != ""}
+            if non_empty:
+                exclusion_dict[col] = non_empty
+                print(f"   📋 Column '{col}': {len(non_empty)} IDs to blank")
+        
+        return exclusion_dict
+    
+    except Exception as e:
+        print(f"⚠️  Error loading RFPD reference file: {e}")
+        print("   Skipping RFPD blanking...")
+        return {}
+
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    if not os.path.exists(SOURCE_FILE):
+        raise FileNotFoundError(f"Source file not found: {SOURCE_FILE}")
+    
+    print("📖 Loading user lookup file...")
+    map_user_id = load_user_lookup(USER_LOOKUP_FILE)
+    
+    print("\n📖 Loading RFPD reference file...")
+    rfpd_exclusions = load_rfpd_reference(RFPD_REFERENCE_FILE)
+    
+    # Data structure to track blanked values: {column_name: [(Id, original_value), ...]}
+    rfpd_blanked_records = {col: [] for col in rfpd_exclusions.keys()}
+    
+    # Prepare output file
+    source_basename = os.path.splitext(os.path.basename(SOURCE_FILE))[0]
+    main_output_file = os.path.join(OUTPUT_DIR, f"{source_basename}_mapped.csv")
+    
+    # Remove existing output file
+    if os.path.exists(main_output_file):
+        os.remove(main_output_file)
+    
+    reader = pd.read_csv(SOURCE_FILE, dtype=str, chunksize=CHUNK_SIZE)
+    header_written = False
+    total_rows = 0
+    
+    print("🔄 Processing source file in chunks...")
+    
+    for chunk_idx, chunk in enumerate(reader, start=1):
+        chunk = chunk.fillna("")
+        
+        # === USER LOOKUP FOR 3 FIELDS ===
+        user_fields = ["OwnerId", "CreatedById", "LastModifiedById"]
+        
+        for col in user_fields:
+            if col in chunk.columns:
+                # Apply simple lookup
+                chunk[col] = chunk[col].apply(map_user_id)
+                
+                # Set defaults for blank/unmapped values
+                if col == "OwnerId":
+                    mask = chunk[col].astype(str).str.strip() == ""
+                    chunk.loc[mask, col] = DEFAULT_OWNER_ID
+                else:  # CreatedById, LastModifiedById
+                    mask = chunk[col].astype(str).str.strip() == ""
+                    chunk.loc[mask, col] = DEFAULT_CREATEDBY_LASTMODIFIED_ID
+        
+        # === RFPD BLANKING LOGIC ===
+        if rfpd_exclusions and "Id" in chunk.columns:
+            for rfpd_col, exclusion_set in rfpd_exclusions.items():
+                if rfpd_col in chunk.columns:
+                    # Find rows where the column value is in the exclusion set
+                    chunk[rfpd_col] = chunk[rfpd_col].astype(str).str.strip()
+                    mask = chunk[rfpd_col].str.lower().isin(exclusion_set)
+                    
+                    if mask.any():
+                        # Store original values with their IDs for review files
+                        blanked_rows = chunk.loc[mask, ["Id", rfpd_col]].copy()
+                        rfpd_blanked_records[rfpd_col].extend(
+                            blanked_rows.values.tolist()
+                        )
+                        
+                        # Blank out the values in the chunk
+                        chunk.loc[mask, rfpd_col] = ""
+        
+        # Write to main output
+        chunk.to_csv(
+            main_output_file,
+            index=False,
+            mode="a" if header_written else "w",
+            header=not header_written,
+            encoding="utf-8-sig",
+        )
+        header_written = True
+        total_rows += len(chunk)
+        
+        print(f"✅ Chunk {chunk_idx}: {len(chunk)} rows processed")
+    
+    # === GENERATE RFPD REVIEW FILES ===
+    rfpd_review_files = []
+    if rfpd_exclusions:
+        print("\n📝 Generating RFPD review files...")
+        for rfpd_col, blanked_list in rfpd_blanked_records.items():
+            if blanked_list:
+                # Create review file with ONLY 2 columns: Id and the RFPD column
+                review_file = os.path.join(OUTPUT_DIR, f"RFPD_Blanked_{rfpd_col}.csv")
+                review_df = pd.DataFrame(blanked_list, columns=["Id", rfpd_col])
+                review_df.to_csv(review_file, index=False, encoding="utf-8-sig")
+                rfpd_review_files.append((rfpd_col, review_file, len(blanked_list)))
+                print(f"   ✅ {rfpd_col}: {len(blanked_list)} records → {review_file}")
+    
+    # === SUMMARY ===
+    print("\n" + "="*60)
+    print("✅ USER MAPPING + RFPD BLANKING COMPLETED!")
+    print("="*60)
+    print(f"📊 Total rows processed: {total_rows}")
+    print(f"📝 Main output: {main_output_file}")
+    
+    main_size_mb = os.path.getsize(main_output_file) / (1024 * 1024)
+    print(f"📏 Output file size: {main_size_mb:.2f} MB")
+    
+    # RFPD Blanking Summary
+    if rfpd_review_files:
+        print("\n" + "-"*60)
+        print("📋 RFPD BLANKING SUMMARY:")
+        print("-"*60)
+        total_blanked = sum(count for _, _, count in rfpd_review_files)
+        print(f"Total records blanked: {total_blanked}")
+        for col, file, count in rfpd_review_files:
+            print(f"  • {col}: {count} records")
+        print(f"\n📂 Review files saved in: {OUTPUT_DIR}")
+    else:
+        print("\n📋 No RFPD blanking performed (no matching columns or no exclusions found)")
+
+
+if __name__ == "__main__":
+    main()
+
