@@ -6,16 +6,16 @@ import pandas as pd
 SOURCE_FILE = r"D:\Production\Source\CaseExtension_Source.csv"
 
 # Lookup files
-USER_LOOKUP_FILE = r"D:\Production\Lookup Files\User_Lkp.csv"
+USER_LOOKUP_FILE = r"D:\Production\Lkp Files\DigitalVsComponent_User_Lkp_File.csv"
 CONTACT_ORIGIN_FILTER_FILE = r"D:\Production\Lookup Files\Contact_Origin_Filter.csv"
 
 # Output directory
 OUTPUT_DIR = r"D:\Production\Output"
 
 # ========= CONSTANTS =========
-# Default IDs for user fields (UPDATE THESE VALUES)
-DEFAULT_OWNER_ID = "PROVIDE_DEFAULT_OWNER_ID"
-DEFAULT_CREATEDBY_LASTMODIFIED_ID = "PROVIDE_DEFAULT_CREATEDBY_LASTMODIFIED_ID"
+# Default IDs for user fields
+DEFAULT_OWNER_ID = "005Vq000008gEtBIAU"
+DEFAULT_CREATEDBY_LASTMODIFIED_ID = "005A0000000rXeVIAU"
 
 CHUNK_SIZE = 50_000
 
